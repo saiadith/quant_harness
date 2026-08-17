@@ -3,7 +3,7 @@ tests/test_pipeline_integration.py
 
 No internet access to huggingface.co in this sandbox, so this can't
 download real Qwen weights. Instead: build a tiny randomly-initialized
-gpt2-architecture model (transformers can construct this from a Config
+llama-architecture model (transformers can construct this from a Config
 with zero network access) plus a minimal hand-rolled character-level
 tokenizer that satisfies the small interface our eval/bench code expects
 (__call__ -> .input_ids, .eos_token_id, .decode). This validates that

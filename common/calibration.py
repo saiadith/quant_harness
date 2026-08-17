@@ -20,7 +20,12 @@ class ActivationStats:
     self.n_rows = 0
 
   def update(self, x_flat):
-    # x_flat: (n_tokens, in_features)
+    # move off gpu before accumulating - the hessian for every linear layer
+    # in the model otherwise stays resident on the gpu at the same time,
+    # which is what actually causes an oom on a t4, not the model weights
+    # themselves. cpu has far more headroom for this.
+    x_flat = x_flat.detach().float().cpu()
+
     batch_max = x_flat.abs().amax(dim=0)
     if self.abs_max is None:
       self.abs_max = batch_max.clone()
@@ -37,7 +42,8 @@ class ActivationStats:
 
   def hessian(self, damping=0.01):
     """gptq-style hessian approximation: H = 2 * X^T X / n, with diagonal damping
-    for numerical stability during inversion."""
+    for numerical stability during inversion. lives on cpu, since update() now
+    accumulates there."""
     h = 2.0 * self.sum_xtx / max(self.n_rows, 1)
     mean_diag = torch.diag(h).mean()
     damp = damping * mean_diag
@@ -47,7 +53,9 @@ class ActivationStats:
 
 def collect_calibration_stats(model, tokenizer, calib_texts, device="cpu", max_length=512, target_module_types=(nn.Linear,)):
   """runs calibration text through the model once, collecting per-linear-layer
-  ActivationStats via forward hooks. returns {module_name: ActivationStats}."""
+  ActivationStats via forward hooks. returns {module_name: ActivationStats}.
+  the forward pass itself still runs on `device` (fast) - only the persistent
+  per-layer stats get moved to cpu inside ActivationStats.update()."""
   stats = {}
   handles = []
 

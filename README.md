@@ -1,111 +1,72 @@
-# Qwen Quantization Build Matrix
+# qwen quantization build matrix
 
-A build-matrix quantization harness for small LLMs, built around the same
-question the target role's internship JD poses: given the hardware and a
-latency budget, which build are we allowed to serve? Every quantization
-technique is implemented from scratch (no bitsandbytes/AutoGPTQ import for
-the actual math — RTN, GPTQ's Hessian-based error correction, and
-SmoothQuant's activation smoothing + outlier handling are all hand-written
-and unit-tested against synthetic data before ever touching a real model).
+i built this to prep for a role that wanted exactly this: given the hardware and a latency budget, which quantized build am i actually allowed to serve? so instead of just calling bitsandbytes or AutoGPTQ, i wrote the actual quantization math myself - round-to-nearest (rtn), gptq's hessian-based error correction, and smoothquant's activation smoothing + outlier handling - and unit tested all of it on synthetic data before ever touching a real model.
 
-## Repo structure
+## what's in here
 
 ```
 common/
-  build_record.py    - the BuildRecord/BuildMatrix schema: what a build IS
-                        and what hardware/workload it's valid for, plus the
-                        "which build should I serve" query logic
-  calibration.py      - forward-hook based collection of per-channel
-                        activation stats + the GPTQ Hessian
+  build_record.py    - the schema for a "build": what it is (technique, bits,
+                        group size) and what hardware/workload it's valid for,
+                        plus the query logic for "which build should i serve"
+  calibration.py      - hooks every linear layer during calibration text and
+                        collects per-channel activation stats + the gptq hessian
 quantizers/
-  rtn.py               - round-to-nearest weight-only quantization (the baseline)
-  gptq_lite.py         - Hessian-based sequential quantization with error
-                        propagation (simplified GPTQ, Frantar et al. 2022)
-  smoothquant.py       - activation smoothing + outlier channel handling
-                        (SmoothQuant, Xiao et al. 2022, + LLM.int8()-style
-                        outlier fallback)
+  rtn.py               - round-to-nearest, the baseline everything else has to beat
+  gptq_lite.py         - my simplified gptq (frantar et al 2022) - sequential,
+                        hessian-weighted error correction, no autogptq import
+  smoothquant.py       - activation smoothing + outlier channel fallback
+                        (xiao et al 2022, plus an llm.int8()-style escape hatch)
 eval/
   perplexity.py        - sliding-window perplexity on held-out text
   downstream_task.py   - multiple-choice accuracy via log-likelihood scoring
 bench/
-  latency.py           - tok/s, time-to-first-token, peak memory
-  build_matrix.py       - orchestrates quantize -> eval -> benchmark into
-                        BuildRecords across every technique
+  latency.py           - tok/s, time to first token, peak memory
+  build_matrix.py       - runs quantize -> eval -> benchmark across every
+                        technique and spits out a BuildRecord for each
 tests/
-  test_quantizers.py            - validates the quantization MATH on
-                                  synthetic linear layers (no model/GPU
-                                  needed) - confirms GPTQ beats RTN on
-                                  correlated data, SmoothQuant kills
-                                  outlier-channel quant error, etc.
-  test_pipeline_integration.py  - validates the WIRING (calibration hooks
-                                  -> quantize -> eval -> bench -> build
-                                  matrix) against a tiny random Llama-arch
-                                  model, no internet access needed
+  test_quantizers.py            - checks the actual math on synthetic linear
+                                  layers, no gpu needed. confirms gptq really
+                                  does beat rtn on correlated data, and
+                                  smoothquant really does kill outlier error
+  test_pipeline_integration.py  - checks the wiring end to end against a tiny
+                                  random model, no internet needed
 notebooks/
-  run_build_matrix.ipynb  - the kaggle notebook: loads a real Qwen2.5
-                            checkpoint and runs the full pipeline on GPU
+  run_build_matrix.ipynb  - the actual kaggle notebook, loads real qwen2.5
+                            and runs the whole thing on gpu
 ```
 
-## Run the tests first
+## run the tests first, seriously
 
 ```bash
-python3 tests/test_quantizers.py            # ~seconds, cpu, no model download
-python3 tests/test_pipeline_integration.py   # ~seconds, cpu, no model download
+python3 tests/test_quantizers.py
+python3 tests/test_pipeline_integration.py
 ```
 
-Both suites are designed to catch bugs in the quantization math and the
-pipeline wiring *before* you spend GPU time on Kaggle. `test_quantizers.py`
-in particular validates the actual research claims: GPTQ reduces
-layer-output error vs RTN at the same bit-width on correlated (realistic)
-activation data, and SmoothQuant + outlier handling nearly eliminates the
-activation-quantization error that outlier channels would otherwise cause.
+both take a few seconds, run on cpu, no model download needed. i'd catch bugs here way before wasting gpu time on kaggle - i actually did catch a real bug this way (my synthetic eval set was accidentally sampling a different random subspace than calibration, which made gptq look worse than rtn for reasons that had nothing to do with the algorithm).
 
-## Run the real thing
+## running it for real
 
-Open `notebooks/run_build_matrix.ipynb` on Kaggle with a T4 x2 GPU
-accelerator. It installs `transformers`, loads `Qwen/Qwen2.5-1.5B` (or
-swap to `0.5B` for faster iteration), and runs the full build matrix:
-fp16 baseline, int8/int4 RTN, int8/int4 GPTQ, plus a separate SmoothQuant
-pass with activation quantization wired in via forward hooks.
+open `notebooks/run_build_matrix.ipynb` on kaggle with a t4x2 gpu turned on. it installs transformers, loads `Qwen/Qwen2.5-1.5B` (swap to the 0.5b checkpoint if you just want a faster loop while debugging), and runs the whole build matrix - fp16 baseline, int8/int4 rtn, int8/int4 gptq - plus a separate smoothquant pass with the activation quantization wired in via forward hooks.
 
-## Why 1.5B over 0.5B on a T4
+## why 1.5b and not 0.5b
 
-0.5B fits and runs easily, but quantization degradation and activation
-outliers are both weaker at that scale — the harness would "work" but the
-numbers wouldn't tell you much. 1.5B (~3GB in fp16) still fits comfortably
-on a single 16GB T4 with room for calibration/eval overhead, and shows
-much more realistic quantization behavior. Keep 0.5B configured as a fast
-dev loop while you're debugging the harness itself.
+0.5b runs fine on a t4 but it's small enough that quantization barely hurts it, so the numbers don't really tell you anything. 1.5b (about 3gb in fp16) still fits comfortably on a 16gb t4 with room to spare, and actually shows realistic degradation and outlier behavior. i kept 0.5b around as a fast dev loop while poking at the harness itself.
 
-## Design notes / where this is intentionally simplified
+## a real bug i hit and how i fixed it
 
-- **RTN and GPTQ run in "fake quant" mode**: weights are quantized then
-  immediately dequantized back to float, rather than packed into real
-  int4/int8 storage with a custom GEMM kernel. This isolates the
-  *quality* question (does this technique preserve model behavior) from
-  the *systems* question (does this technique actually run faster on
-  real hardware) — the latter is exactly what `llm-compressor` /
-  NVIDIA Model-Optimizer solve with real kernels, and is the natural next
-  layer to add once the quantization math itself is validated.
-- **GPTQ here is a straightforward per-column loop**, not the paper's
-  blockwise-Cholesky-batched implementation — correct, but O(d^2) per
-  layer in Python loops rather than vectorized blocks. Fine for 1.5B-scale
-  layers; would need blocking for much larger models.
-- **SmoothQuant's activation path needs a forward hook** to fully
-  simulate (see the notebook's dedicated cell) since `quantize_model_weights_smoothquant_`
-  only touches the stored weights — the activation-side quantization has
-  to happen live during the forward pass.
-- **The quality gate defaults are placeholders** (5% perplexity delta, 2%
-  downstream accuracy delta) — tune these against what your actual speech
-  pipeline's downstream WER/UTMOS sensitivity looks like once you have one.
+first real run on kaggle, gptq calibration blew up with a cuda oom. turns out the calibration hook was building a full hessian (in_features x in_features) for every single linear layer in the model and keeping all of them on the gpu at once - for qwen's mlp layers that's thousands of dimensions per hessian, times a couple dozen layers, and it just didn't fit alongside the model weights.
 
-## Open research questions this harness is built to help answer
+fix: the hessian accumulation now happens on cpu instead. the forward pass itself still runs on gpu (that part's fast), but the stats that actually need to stick around get moved off gpu immediately. costs a bit of speed on the gptq quantization step itself since it now does its per-column math on cpu, but it doesn't crash anymore, which i'll take.
 
-1. **Does the best build actually differ by hardware?** Run the notebook
-   on two different GPU generations, merge the resulting
-   `build_matrix_*.json` files, and call
-   `BuildMatrix.compare_ranking_across_hardware()`.
-2. **Is speculative decoding lossless for audio?** Not implemented here —
-   see the "research question 2" cell in the notebook for how the
-   `BuildRecord` schema is meant to extend to this, and [3] in the JD's
-   reading list for the audio-specific framing of the problem.
+## stuff i simplified on purpose
+
+- **rtn and gptq run in "fake quant" mode** - i quantize then immediately dequantize back to float, instead of packing into real int4/int8 storage with a custom gemm kernel. this isolates "does this preserve quality" from "does this actually run faster on real hardware," which is really a separate systems problem (that's what llm-compressor / nvidia model-optimizer solve with real kernels)
+- **my gptq is a plain per-column python loop**, not the paper's blocked cholesky implementation. correct, but not vectorized, so it's slower than it could be - fine at 1.5b scale, would need blocking for anything bigger
+- **smoothquant's activation side needs a forward hook** to fully simulate - the weight-quantizing function only touches the stored weights, the activation quantization has to happen live during the forward pass (see the dedicated cell in the notebook)
+- **the quality gate thresholds are placeholders** (5% ppl delta, 2% downstream delta) - i'd tune these against real wer/utmos sensitivity if i had an actual speech pipeline to test against
+
+## open questions i'm still poking at
+
+1. **does the best build actually depend on the hardware?** run the notebook on two different gpu generations, merge the two `build_matrix_*.json` files, call `BuildMatrix.compare_ranking_across_hardware()` and see if they agree
+2. **is speculative decoding lossless for audio?** haven't built this part yet - see the relevant notebook cell for how i'm thinking about extending the BuildRecord schema for it

@@ -11,11 +11,13 @@ def code(src):
 
 md("""# qwen quantization build matrix — kaggle t4x2
 
-Runs the harness in `../` against a real Qwen2.5 checkpoint: RTN and GPTQ weight quantization, SmoothQuant activation smoothing, a perplexity + downstream-task quality gate, and latency/memory benchmarking — producing one `BuildRecord` per technique.
+runs the harness in `../` against a real Qwen2.5 checkpoint: rtn and gptq weight quantization, smoothquant activation smoothing, a perplexity + downstream-task quality gate, and latency/memory benchmarking.
 
-**Runtime**: Kaggle notebook settings -> Accelerator -> GPU T4 x2. This harness only needs one GPU; the second is handy for running a second hardware/precision comparison in parallel later, or for the speculative-decoding draft+verifier pair in a follow-up notebook.
+**runtime**: kaggle notebook settings -> accelerator -> gpu t4 x2, internet on (needed for the model download).
 
-Set `MODEL_NAME` below to switch between the 0.5B (fast iteration) and 1.5B (more representative quantization results) checkpoints.""")
+set `MODEL_NAME` below to switch between the 0.5b (fast iteration) and 1.5b (more representative quantization results) checkpoints.
+
+note on gptq speed: gptq's calibration hessian is kept on cpu (fixes a cuda oom that otherwise hits on a 16gb t4 - see the readme), which makes the gptq quantization step slower than a pure-gpu version would be. if a full run feels like it's taking forever, drop `int8_gptq` from the techniques list below and just run `int4_gptq` first.""")
 
 code("""
 !pip install -q transformers accelerate
@@ -30,9 +32,7 @@ print("cuda available:", torch.cuda.is_available())
 print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")
 """)
 
-md("""## load model + tokenizer
-
-`MODEL_NAME = "Qwen/Qwen2.5-1.5B"` is the primary target (see the writeup for why 1.5B shows more realistic quantization effects than 0.5B on a T4). Switch to `"Qwen/Qwen2.5-0.5B"` for a fast dev loop while debugging the harness itself.""")
+md("""## load model + tokenizer""")
 
 code("""
 MODEL_NAME = "Qwen/Qwen2.5-1.5B"
@@ -58,7 +58,7 @@ print(tokenizer.decode(out[0], skip_special_tokens=True))
 
 md("""## run the full build matrix
 
-fp16 baseline, int8/int4 rtn, int8/int4 gptq. each build is quantized from a fresh copy of the fp16 checkpoint (`build_and_evaluate` deep-copies `base_model`), evaluated for perplexity + downstream accuracy relative to the fp16 baseline, and benchmarked for tok/s, time-to-first-token, and peak memory. this takes a while on a T4 — GPTQ's calibration forward passes plus the per-column Hessian correction are the slow part; expect several minutes for 1.5B.""")
+fp16 baseline, int8/int4 rtn, int8/int4 gptq. this can take a while on a t4 - gptq's calibration + per-column hessian correction is the slow part.""")
 
 code("""
 from bench.build_matrix import run_full_build_matrix
@@ -78,7 +78,7 @@ print("saved build_matrix_t4.json")
 
 md("""## smoothquant pass, separately
 
-smoothquant modifies the activation path as well as the weights (see `quantizers/smoothquant.py`'s docstring — the module quantizes the weight side directly, and wrapping the live forward pass to also fake-quantize activations needs a forward hook rather than the copy-and-mutate pattern `build_and_evaluate` uses for rtn/gptq). This cell shows that wiring explicitly with hooks, on the attention/mlp projection layers only (the layers where activation outliers actually show up).""")
+smoothquant modifies the activation path as well as the weights - the weight-quantizing function only touches stored weights, so activation quantization needs a forward hook to fully simulate.""")
 
 code("""
 import copy
@@ -92,8 +92,6 @@ sq_info = quantize_model_weights_smoothquant_(sq_model, calib_stats, bits=8, gro
 
 print(f"smoothquant applied to {len(sq_info)} layers")
 
-# wrap each smoothed layer's forward to also fake-quantize its activations,
-# dividing by the same smoothing scale baked into the weight
 def make_smoothquant_hook(scale, outlier_idx):
   def hook(module, inputs):
     x = inputs[0]
@@ -120,9 +118,9 @@ for h in handles:
   h.remove()
 """)
 
-md("""## research question 1: does the best build actually differ by hardware?
+md("""## does the best build actually differ by hardware?
 
-run this same notebook on a second hardware tag (kaggle only gives T4 here — for a second point, an A10/L4/A100 on colab or a cloud spot instance works) and merge the two `build_matrix_*.json` files below. If the two hardware tags agree on the ranking, that's evidence the model-side quantization choice is fairly hardware-independent for this model size; if they disagree, it's evidence the "best build" genuinely depends on the serving GPU, which is the premise the whole build-matrix idea rests on.""")
+run this same notebook on a second gpu generation, merge the two `build_matrix_*.json` files below, and compare rankings.""")
 
 code("""
 import json
@@ -148,17 +146,13 @@ def load_build_matrix_json(path):
 # print(combined.compare_ranking_across_hardware("T4", "ADA"))
 """)
 
-md("""## research question 2: is speculative decoding lossless for audio?
-
-Out of scope for this notebook (needs a draft/verifier pair and a speech-token vocabulary), but the harness's `BuildRecord` schema already has room for it: a speculative-decoding build would report a *higher* `tokens_per_sec` at the *same* `perplexity`/`downstream_accuracy` as its non-speculative counterpart if and only if the acceptance criterion is exact (lossless). The natural follow-up experiment is comparing greedy-equivalent vs relaxed acceptance thresholds and watching exactly where `perplexity_delta_pct` stops being ~0 — see [3] in the JD's reading list (ICASSP 2026, "Principled Coarse-Grained Acceptance for Speculative Decoding in Speech") for the audio-specific framing of this question.""")
-
 md("""## next steps
 
-- swap `default_calibration_texts()` / `default_eval_text()` / `default_eval_set()` for real calibration data (a slice of c4/wikitext) and a real downstream benchmark (arc-easy, piqa) via `datasets.load_dataset` once running on kaggle with network access
-- extend `TECHNIQUES` in `bench/build_matrix.py` with an `nvfp4`/2:4-sparse entry once you've validated the sparsity path (`quantizers/` doesn't have a sparsity module yet — natural phase-4 addition)
-- try the same build matrix against `Qwen/Qwen2.5-0.5B` for a fast-iteration comparison, and see whether the 0.5B ranking agrees with 1.5B's - a second flavor of the "does the best build depend on X" question, this time X = model size instead of hardware""")
+- swap `default_calibration_texts()` / `default_eval_text()` / `default_eval_set()` for real calibration data and a real downstream benchmark via `datasets.load_dataset`
+- add a sparsity module (2:4 pruning) once the quantization side feels solid
+- speculative decoding for audio is still an open question - see the readme""")
 
 nb["cells"] = cells
-with open("/home/claude/qwen_quant_harness/notebooks/run_build_matrix.ipynb", "w") as f:
+with open("/home/claude/quant_harness_fixed/notebooks/run_build_matrix.ipynb", "w") as f:
   nbf.write(nb, f)
 print("notebook written, cells:", len(cells))

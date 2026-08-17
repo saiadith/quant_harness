@@ -23,6 +23,14 @@ this version keeps the math visible column-by-column instead):
        - compute the residual error, scaled by 1 / U[i, i]
        - subtract that error's projection onto every NOT-YET-quantized
          column, using row i of U as the weighting
+
+Note: quantize_model_weights_gptq_ below runs this on CPU. The calibration
+Hessian is CPU-resident (see common/calibration.py) to avoid an OOM from
+keeping every layer's Hessian on the GPU at once, so the weight being
+quantized has to move to CPU too for the two to interoperate. This makes
+GPTQ noticeably slower than doing the same math on GPU - a fine trade for
+correctness on a 16GB T4, but worth knowing if a full build matrix run
+feels like it's taking a while.
 """
 
 import torch
@@ -85,7 +93,11 @@ def gptq_quantize_layer(weight, hessian, bits=4, group_size=128, symmetric=True,
 def quantize_model_weights_gptq_(model, calib_stats, bits=4, group_size=128, symmetric=True, damping=0.01, target_module_types=None):
   """in-place gptq quantization of every linear layer for which we collected
   calibration stats. layers without stats (not exercised by calibration
-  text) silently fall back to skip - log a warning in real use."""
+  text) silently fall back to skip - log a warning in real use.
+
+  weight is moved to cpu before quantizing since the hessian is cpu-resident
+  (see the OOM fix in common/calibration.py) - both operands need to be on
+  the same device for the matmuls in gptq_quantize_layer to work."""
   import torch.nn as nn
   target_module_types = target_module_types or (nn.Linear,)
   skip_name_substrings = ("lm_head", "embed_tokens")
@@ -99,7 +111,9 @@ def quantize_model_weights_gptq_(model, calib_stats, bits=4, group_size=128, sym
         continue
       H = calib_stats[name].hessian(damping=damping)
       with torch.no_grad():
-        deq = gptq_quantize_layer(module.weight.data.float(), H, bits=bits, group_size=group_size, symmetric=symmetric, damping=damping)
-        module.weight.data.copy_(deq.to(module.weight.dtype))
+        orig_device = module.weight.data.device
+        w_cpu = module.weight.data.float().cpu()
+        deq = gptq_quantize_layer(w_cpu, H, bits=bits, group_size=group_size, symmetric=symmetric, damping=damping)
+        module.weight.data.copy_(deq.to(orig_device).to(module.weight.dtype))
       n_quantized += 1
   return n_quantized

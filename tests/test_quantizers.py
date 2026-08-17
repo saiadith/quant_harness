@@ -37,11 +37,8 @@ def make_correlated_calibration_data(n_tokens=2000, in_features=256, n_outlier_c
   calls - real calibration text and real eval text come from the same
   domain/distribution, so the correlation structure gptq calibrates on
   should match what it's evaluated on. regenerating a fresh random
-  subspace per call (the original version of this function) silently
-  breaks that assumption and makes gptq look worse than rtn for reasons
-  that have nothing to do with the algorithm - a good reminder that
-  calibration/eval distribution mismatch is a real failure mode to
-  watch for later with actual text data too."""
+  subspace per call silently breaks that assumption and makes gptq look
+  worse than rtn for reasons that have nothing to do with the algorithm."""
   if seed is not None:
     torch.manual_seed(seed)
   if basis is None:

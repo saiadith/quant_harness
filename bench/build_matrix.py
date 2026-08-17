@@ -11,6 +11,7 @@ you can get access to) and merge the resulting JSON files to answer the
 """
 
 import copy
+import gc
 import sys
 import os
 
@@ -83,6 +84,7 @@ def build_and_evaluate(base_model, tokenizer, technique_name, device="cuda", wor
   )
 
   del model
+  gc.collect()
   if device.startswith("cuda"):
     import torch
     torch.cuda.empty_cache()
@@ -102,6 +104,10 @@ def run_full_build_matrix(base_model, tokenizer, device="cuda", workload_tag="ge
   baseline_record = build_and_evaluate(base_model, tokenizer, "fp16", device=device, workload_tag=workload_tag)
   matrix.apply_quality_gate(baseline_record)
   matrix.add(baseline_record)
+  gc.collect()
+  if device.startswith("cuda"):
+    import torch
+    torch.cuda.empty_cache()
 
   for name in techniques:
     if name == "fp16":
@@ -113,5 +119,9 @@ def run_full_build_matrix(base_model, tokenizer, device="cuda", workload_tag="ge
     )
     matrix.apply_quality_gate(record)
     matrix.add(record)
+    gc.collect()
+    if device.startswith("cuda"):
+      import torch
+      torch.cuda.empty_cache()
 
   return matrix
