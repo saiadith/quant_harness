@@ -1,6 +1,6 @@
 # qwen quantization build matrix
 
-i built this to prep for a role that wanted exactly this: given the hardware and a latency budget, which quantized build am i actually allowed to serve? so instead of just calling bitsandbytes or AutoGPTQ, i wrote the actual quantization math myself - round-to-nearest (rtn), gptq's hessian-based error correction, and smoothquant's activation smoothing + outlier handling - and unit tested all of it on synthetic data before ever touching a real model.
+Given the hardware and a latency budget, which quantized build am i actually allowed to serve? so instead of just calling bitsandbytes or AutoGPTQ, i decided to build from scratch. The actual round-to-nearest (rtn), gptq's hessian-based error correction, and smoothquant's activation smoothing + outlier handling - and unit tested all of it on synthetic data before ever touching a real model.
 
 ## what's in here
 
@@ -36,7 +36,7 @@ notebooks/
                             and runs the whole thing on gpu
 ```
 
-## run the tests first, seriously
+## run the tests first
 
 ```bash
 python3 tests/test_quantizers.py
@@ -51,19 +51,19 @@ open `notebooks/run_build_matrix.ipynb` on kaggle with a t4x2 gpu turned on. it 
 
 ## why 1.5b and not 0.5b
 
-0.5b runs fine on a t4 but it's small enough that quantization barely hurts it, so the numbers don't really tell you anything. 1.5b (about 3gb in fp16) still fits comfortably on a 16gb t4 with room to spare, and actually shows realistic degradation and outlier behavior. i kept 0.5b around as a fast dev loop while poking at the harness itself.
+0.5b runs fine on a t4 but it's small enough that quantization barely hurts it, so the numbers don't really tell you anything. 1.5b (about 3gb in fp16) still fits comfortably on a 16gb t4 and actually shows realistic degradation and outlier behavior. i kept 0.5b around as a fast dev loop while poking at the harness itself.
 
 ## a real bug i hit and how i fixed it
 
-first real run on kaggle, gptq calibration blew up with a cuda oom. turns out the calibration hook was building a full hessian (in_features x in_features) for every single linear layer in the model and keeping all of them on the gpu at once - for qwen's mlp layers that's thousands of dimensions per hessian, times a couple dozen layers, and it just didn't fit alongside the model weights.
+first real run on kaggle, gptq calibration blew up with a cuda oom. This is bcecause the calibration hook building a full hessian (in_features x in_features) for every single linear layer in the model and kept all of them on the gpu at once - for qwen's mlp layers that's thousands of dimensions per hessian, times athe number of layers, and it just didn't fit alongside the model weights.
 
-fix: the hessian accumulation now happens on cpu instead. the forward pass itself still runs on gpu (that part's fast), but the stats that actually need to stick around get moved off gpu immediately. costs a bit of speed on the gptq quantization step itself since it now does its per-column math on cpu, but it doesn't crash anymore, which i'll take.
+I had to resort to the hessian accumulation on cpu instead. the forward pass itself still runs on gpu (that part's fast), but the stats that actually need to stick around get moved off gpu immediately. costs a bit of speed on the gptq quantization step itself since it now does its per-column math on cpu, but it doesn't crash anymore, which i'll take.
 
 ## stuff i simplified on purpose
 
 - **rtn and gptq run in "fake quant" mode** - i quantize then immediately dequantize back to float, instead of packing into real int4/int8 storage with a custom gemm kernel. this isolates "does this preserve quality" from "does this actually run faster on real hardware," which is really a separate systems problem (that's what llm-compressor / nvidia model-optimizer solve with real kernels)
-- **my gptq is a plain per-column python loop**, not the paper's blocked cholesky implementation. correct, but not vectorized, so it's slower than it could be - fine at 1.5b scale, would need blocking for anything bigger
-- **smoothquant's activation side needs a forward hook** to fully simulate - the weight-quantizing function only touches the stored weights, the activation quantization has to happen live during the forward pass (see the dedicated cell in the notebook)
+- **my gptq is a plain per-column python loop**, not the paper's blocked cholesky implementation. correct, but not vectorized, so it's slower than it could be - fine at 1.5b scale ig.
+- **smoothquant's activation side needs a forward hook** to fully simulate. the weight-quantizing function only touches the stored weights, the activation quantization has to happen live during the forward pass (I actually have a dedicated cell in the notebookthat would be easier to see taht than explain here)
 - **the quality gate thresholds are placeholders** (5% ppl delta, 2% downstream delta) - i'd tune these against real wer/utmos sensitivity if i had an actual speech pipeline to test against
 
 ## open questions i'm still poking at
